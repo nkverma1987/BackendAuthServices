@@ -1,12 +1,14 @@
 ﻿using BackendAuthDemo.Context;
 using BackendAuthDemo.Helpers;
 using BackendAuthDemo.Models;
+using BackendAuthDemo.Models.DTO;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System;
 using System.IdentityModel.Tokens.Jwt;
+using System.Linq;
 using System.Security.Claims;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -36,12 +38,17 @@ namespace BackendAuthDemo.Controllers
                 return NotFound(new { Message = "Password does not match!" });
 
             user.Token = CreateJwt(userDb);
+            var newAccessToken = user.Token;
+            user.RefreshToken = CreateRefreshToken();
+
+            // need to save refresh token and user token values in db
+            await _authContext.SaveChangesAsync();
 
             return Ok(
-                    new
+                    new TokenApiDTO
                     {
-                        Token = user.Token,
-                        Message = "Login Success!"
+                        AccessToken = newAccessToken,
+                        RefreshToken = user.RefreshToken
                     });
         }
 
@@ -115,6 +122,40 @@ namespace BackendAuthDemo.Controllers
             };
             var token = jwtTokenHandler.CreateToken(tokenDescriptor);
             return jwtTokenHandler.WriteToken(token);
+        }
+
+        private string CreateRefreshToken()
+        {
+            var tokenInt = System.Security.Cryptography.RandomNumberGenerator.GetInt32(64);
+            var refreshToken = Convert.ToBase64String(new byte[tokenInt]);
+
+            var tokenInUser = _authContext.Users
+                .Any(a => a.RefreshToken == refreshToken);
+            if (tokenInUser)
+            {
+                return CreateRefreshToken();
+            }
+            return refreshToken;
+        }
+
+        private ClaimsPrincipal GetPrincipleFromExpiredToken(string token)
+        {
+            var key = Encoding.ASCII.GetBytes("veryverysceret.....");
+            var tokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateAudience = false,
+                ValidateIssuer = false,
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(key),
+                ValidateLifetime = false
+            };
+            var tokenHandler = new JwtSecurityTokenHandler();
+            SecurityToken securityToken;
+            var principal = tokenHandler.ValidateToken(token, tokenValidationParameters, out securityToken);
+            var jwtSecurityToken = securityToken as JwtSecurityToken;
+            if (jwtSecurityToken == null || !jwtSecurityToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.InvariantCultureIgnoreCase))
+                throw new SecurityTokenException("This is Invalid Token");
+            return principal;
         }
 
         #endregion
