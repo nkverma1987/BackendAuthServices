@@ -5,11 +5,7 @@ using BackendAuthDemo.Models.DTO;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.IdentityModel.Tokens;
 using System;
-using System.IdentityModel.Tokens.Jwt;
-using System.Linq;
-using System.Security.Claims;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -21,9 +17,11 @@ namespace BackendAuthDemo.Controllers
     public class UserController : ControllerBase
     {
         private readonly AppDbContext _authContext;
-        public UserController(AppDbContext authContext)
+        private readonly IJWTTokenService _jwtService;
+        public UserController(AppDbContext authContext, IJWTTokenService jwtService)
         {
             _authContext = authContext;
+            _jwtService = jwtService;
         }
         [HttpPost("authenticate")]
         public async Task<IActionResult> Authenticate(User user)
@@ -37,10 +35,11 @@ namespace BackendAuthDemo.Controllers
             if (!EncryptPassword.VerifyPassword(user.Password, userDb.Password))
                 return NotFound(new { Message = "Password does not match!" });
 
-            user.Token = CreateJwt(userDb);
-            var newAccessToken = user.Token;
-            user.RefreshToken = CreateRefreshToken();
-
+            userDb.Token = _jwtService.CreateJwt(userDb);
+            var newAccessToken = userDb.Token;
+            var newRefreshToken = _jwtService.CreateRefreshToken(_authContext.Users);
+            userDb.RefreshToken = newRefreshToken;
+            userDb.RefreshTokenExpiryTime = DateTime.Now.AddDays(5);
             // need to save refresh token and user token values in db
             await _authContext.SaveChangesAsync();
 
@@ -48,7 +47,7 @@ namespace BackendAuthDemo.Controllers
                     new TokenApiDTO
                     {
                         AccessToken = newAccessToken,
-                        RefreshToken = user.RefreshToken
+                        RefreshToken = userDb.RefreshToken
                     });
         }
 
@@ -100,64 +99,33 @@ namespace BackendAuthDemo.Controllers
             return sb.ToString();
         }
 
-        #region token
+        #region token       
 
-        private string CreateJwt(User user)
+        [HttpPost("refresh")]
+        public async Task<IActionResult> Refresh(TokenApiDTO tokenApiDto)
         {
-            var jwtTokenHandler = new JwtSecurityTokenHandler();
-            var key = Encoding.ASCII.GetBytes("veryverysceret.....");
-            var identity = new ClaimsIdentity(new Claim[]
+            if (tokenApiDto is null)
+                return BadRequest("Invalid Client Request");
+            string accessToken = tokenApiDto.AccessToken;
+            string refreshToken = tokenApiDto.RefreshToken;
+            var principal = _jwtService.GetPrincipleFromExpiredToken(accessToken);
+            var username = principal.Identity.Name;
+            var user = await _authContext.Users.FirstOrDefaultAsync(u => u.UserName == username);
+            if (user is null || user.RefreshToken != refreshToken || user.RefreshTokenExpiryTime <= DateTime.Now)
+                return BadRequest("Invalid Request");
+            var newAccessToken = _jwtService.CreateJwt(user);
+            var newRefreshToken = _jwtService.CreateRefreshToken(_authContext.Users);
+            user.RefreshToken = newRefreshToken;
+            await _authContext.SaveChangesAsync();
+            return Ok(new TokenApiDTO()
             {
-                new Claim(ClaimTypes.Role, user.Role),
-                new Claim(ClaimTypes.Name,$"{user.UserName}")
+                AccessToken = newAccessToken,
+                RefreshToken = newRefreshToken,
             });
-
-            var credentials = new SigningCredentials(new SymmetricSecurityKey(key), SecurityAlgorithms.HmacSha256);
-
-            var tokenDescriptor = new SecurityTokenDescriptor
-            {
-                Subject = identity,
-                Expires = DateTime.Now.AddSeconds(600),
-                SigningCredentials = credentials
-            };
-            var token = jwtTokenHandler.CreateToken(tokenDescriptor);
-            return jwtTokenHandler.WriteToken(token);
-        }
-
-        private string CreateRefreshToken()
-        {
-            var tokenInt = System.Security.Cryptography.RandomNumberGenerator.GetInt32(64);
-            var refreshToken = Convert.ToBase64String(new byte[tokenInt]);
-
-            var tokenInUser = _authContext.Users
-                .Any(a => a.RefreshToken == refreshToken);
-            if (tokenInUser)
-            {
-                return CreateRefreshToken();
-            }
-            return refreshToken;
-        }
-
-        private ClaimsPrincipal GetPrincipleFromExpiredToken(string token)
-        {
-            var key = Encoding.ASCII.GetBytes("veryverysceret.....");
-            var tokenValidationParameters = new TokenValidationParameters
-            {
-                ValidateAudience = false,
-                ValidateIssuer = false,
-                ValidateIssuerSigningKey = true,
-                IssuerSigningKey = new SymmetricSecurityKey(key),
-                ValidateLifetime = false
-            };
-            var tokenHandler = new JwtSecurityTokenHandler();
-            SecurityToken securityToken;
-            var principal = tokenHandler.ValidateToken(token, tokenValidationParameters, out securityToken);
-            var jwtSecurityToken = securityToken as JwtSecurityToken;
-            if (jwtSecurityToken == null || !jwtSecurityToken.Header.Alg.Equals(SecurityAlgorithms.HmacSha256, StringComparison.InvariantCultureIgnoreCase))
-                throw new SecurityTokenException("This is Invalid Token");
-            return principal;
         }
 
         #endregion
+
     }
+
 }

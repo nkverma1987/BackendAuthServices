@@ -4,6 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using BackendAuthDemo.Context;
+using BackendAuthDemo.Helpers;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
@@ -53,6 +54,7 @@ namespace BackendAuthDemo
                     .AllowCredentials());
             });
 
+            services.AddTransient<IJWTTokenService, JWTTokenService>();
             // JWT setting
 
             services.AddAuthentication(x =>
@@ -96,7 +98,7 @@ namespace BackendAuthDemo
 
             app.UseAuthorization();
 
-                    
+
             app.UseEndpoints(endpoints =>
             {
                 endpoints.MapControllers();
